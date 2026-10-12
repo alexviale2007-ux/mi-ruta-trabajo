@@ -1,38 +1,47 @@
 "use client";
-import {useEffect,useMemo,useState} from "react";
-import {Camera,Coffee,MapPin,Navigation,CheckCircle2,Sparkles,Clock3,BarChart3} from "lucide-react";
+import {useEffect,useState} from "react";
+import {Camera,MapPin,Navigation,CheckCircle2,Clock3,Coffee,Plus,BarChart3} from "lucide-react";
 import {supabase} from "../lib/supabase";
-type Machine={id:string;type:string;clean:boolean};
-type Stop={id:string;client:string;address:string;machines:Machine[];minutes:number;done?:boolean};
-const initial:Stop[]=[
-{id:"1",client:"Cliente Vallès",address:"Barberà del Vallès",minutes:24,machines:[{id:"CAF-1042",type:"Café",clean:true},{id:"SNK-2018",type:"Snack",clean:false}]},
-{id:"2",client:"Centre Logístic",address:"Ripollet",minutes:31,machines:[{id:"CAF-1091",type:"Café",clean:false},{id:"AG-441",type:"Agua",clean:false},{id:"SNK-2190",type:"Snack",clean:false}]}
-];
+import {cleaningDue,wazeUrl} from "../lib/route-utils";
+type Client={id:string;name:string;address:string|null};
+type Machine={id:string;client_id:string;label:string;external_code:string|null;machine_type:string;last_cleaned_at:string|null;cleaning_interval_days:number};
+type Stop={id:string;client_id:string;stop_order:number;status:string;started_at:string|null;finished_at:string|null;estimated_minutes:number|null};
+type Route={id:string;route_date:string};
 export default function Home(){
- const [stops,setStops]=useState<Stop[]>(initial),[tab,setTab]=useState("hoy"),[cloud,setCloud]=useState("Conectando…");
- useEffect(()=>{(async()=>{try{
-   let {data:{session}}=await supabase.auth.getSession();
-   if(!session){const r=await supabase.auth.signInAnonymously();if(r.error)throw r.error;}
-   setCloud("Sesión conectada · datos de demostración");
- }catch{setCloud("Modo demostración · sin sesión");}})()},[]);
- const machines=useMemo(()=>stops.reduce((n,s)=>n+s.machines.length,0),[stops]);
- const cleans=useMemo(()=>stops.flatMap(s=>s.machines).filter(m=>m.clean).length,[stops]);
- const done=stops.filter(s=>s.done).length;
- const toggle=(id:string)=>setStops(x=>x.map(s=>s.id===id?{...s,done:!s.done}:s));
- const waze=(a:string)=>"https://www.waze.com/ul?q="+encodeURIComponent(a)+"&navigate=yes";
- return <main>
- <header><div className="eyebrow"><Sparkles size={15}/> RUTA DE HOY · DEMO</div><h1>Buenos días</h1><p className="sub">Tu jornada, organizada para terminar antes.</p>
- <div className="finish"><span><Clock3 size={18}/> Fin estimado (demo)</span><strong>14:18</strong><em>Ejemplo</em></div>
- <div className="stats"><div><b>{stops.length}</b><span>Paradas</span></div><div><b>{machines}</b><span>Máquinas</span></div><div><b>{cleans}</b><span>Limpiar</span></div></div></header>
- <section className="content"><div className="status"><span className="dot"/>{cloud}</div>
- <nav>{[["hoy","Hoy"],["limpieza","Limpieza"],["progreso","Progreso"]].map(([k,l])=><button className={tab===k?"active":""} onClick={()=>setTab(k)} key={k}>{l}</button>)}</nav>
- {tab==="hoy"&&<><label className="scan"><Camera/><div><strong>Seleccionar foto de ruta</strong><small>La lectura automática aún está pendiente</small></div><input type="file" accept="image/*" capture="environment"/></label>
- <div className="sectionTitle"><div><span>RECORRIDO DE EJEMPLO</span><h2>Tu ruta</h2></div><b>{done}/{stops.length}</b></div>
- {stops.map((s,i)=><article className={"stop "+(s.done?"completed":"")} key={s.id}>
- <div className="stopTop"><span className="number">{i+1}</span><div className="grow"><h3>{s.client}</h3><p><MapPin size={14}/>{s.address}</p></div><span className="time">{s.minutes} min</span></div>
- <div className="machines">{s.machines.map(m=><span key={m.id} className={m.clean?"due":""}>{m.type} · {m.id}{m.clean?" · limpiar":""}</span>)}</div>
- <div className="actions"><a href={waze(s.address)} target="_blank" rel="noreferrer"><Navigation size={17}/> Abrir Waze</a><button onClick={()=>toggle(s.id)}><CheckCircle2 size={17}/>{s.done?"Hecha":"Terminar"}</button></div></article>)}</>}
- {tab==="limpieza"&&<div className="panel"><Coffee size={28}/><h2>Limpiezas</h2><p>Ejemplo de control de cafeteras. Pendiente de guardar fechas reales.</p>{stops.flatMap(s=>s.machines.map(m=>({...m,client:s.client}))).filter(m=>m.type==="Café").map(m=><div className="cleanRow" key={m.id}><div><b>{m.id}</b><small>{m.client}</small></div><span>{m.clean?"Toca limpiar":"Al día"}</span></div>)}</div>}
- {tab==="progreso"&&<div className="panel"><BarChart3 size={28}/><h2>Mi rendimiento</h2><div className="progress"><div><b>Demo</b><span>ahorro estimado</span></div><div><b>14:18</b><span>fin de ejemplo</span></div><div><b>{done}</b><span>paradas marcadas</span></div></div><p>Las estadísticas reales se activarán al guardar rutas y tiempos en la base de datos.</p></div>}
- </section></main>
+ const [userId,setUserId]=useState(""); const [error,setError]=useState("");const [busy,setBusy]=useState(false);
+ const [clients,setClients]=useState<Client[]>([]),[machines,setMachines]=useState<Machine[]>([]),[stops,setStops]=useState<Stop[]>([]),[route,setRoute]=useState<Route|null>(null);
+ const [tab,setTab]=useState("hoy"),[name,setName]=useState(""),[address,setAddress]=useState(""),[code,setCode]=useState(""),[kind,setKind]=useState("coffee"),[selected,setSelected]=useState("");
+ const today=new Date().toLocaleDateString("en-CA");
+ async function load(uid:string){
+  const [c,m,r]=await Promise.all([supabase.from("clients").select("*").eq("user_id",uid).order("name"),supabase.from("machines").select("*").eq("user_id",uid),supabase.from("routes").select("*").eq("user_id",uid).eq("route_date",today).order("created_at",{ascending:false}).limit(1)]);
+  if(c.error||m.error||r.error)throw new Error(c.error?.message||m.error?.message||r.error?.message);
+  setClients(c.data||[]);setMachines(m.data||[]);
+  const rt=r.data?.[0]||null;setRoute(rt);
+  if(rt){const s=await supabase.from("route_stops").select("*").eq("route_id",rt.id).order("stop_order");if(s.error)throw s.error;setStops(s.data||[]);}else setStops([]);
+ }
+ useEffect(()=>{(async()=>{try{const session=await supabase.auth.getSession();let uid=session.data.session?.user.id;
+ if(!uid){const login=await supabase.auth.signInAnonymously();if(login.error)throw login.error;uid=login.data.user?.id;}
+ if(!uid)throw new Error("No se ha podido iniciar sesión");setUserId(uid);await load(uid);
+ }catch(e){setError("No se pudo conectar: "+String(e instanceof Error?e.message:e)+". Comprueba que Anonymous Sign-ins esté activado en Supabase Auth.");}})()},[]);
+ async function action(fn:()=>Promise<void>){setBusy(true);setError("");try{await fn();await load(userId);}catch(e){setError(String(e instanceof Error?e.message:e));}finally{setBusy(false);}}
+ async function addClient(){if(!name.trim())return;await action(async()=>{const r=await supabase.from("clients").insert({user_id:userId,name:name.trim(),address:address.trim()||null});if(r.error)throw r.error;setName("");setAddress("");});}
+ async function addMachine(){if(!selected)return;await action(async()=>{const r=await supabase.from("machines").insert({user_id:userId,client_id:selected,label:kind==="coffee"?"Cafetera":kind==="snack"?"Snack":kind==="water"?"Agua":"Máquina",external_code:code.trim()||null,machine_type:kind});if(r.error)throw r.error;setCode("");});}
+ async function addStop(clientId:string){await action(async()=>{let id=route?.id;if(!id){const r=await supabase.from("routes").insert({user_id:userId,route_date:today}).select("id").single();if(r.error)throw r.error;id=r.data.id;}
+ const s=await supabase.from("route_stops").insert({user_id:userId,route_id:id,client_id:clientId,stop_order:stops.length+1,estimated_minutes:Math.max(10,machines.filter(m=>m.client_id===clientId).length*8),status:"pending"});if(s.error)throw s.error;});}
+ async function changeStop(s:Stop){await action(async()=>{const update=s.status==="done"?{status:"pending",started_at:null,finished_at:null}:s.status==="active"?{status:"done",finished_at:new Date().toISOString()}:{status:"active",started_at:new Date().toISOString()};const r=await supabase.from("route_stops").update(update).eq("id",s.id).eq("user_id",userId);if(r.error)throw r.error;});}
+ async function clean(m:Machine){await action(async()=>{const at=new Date().toISOString();const a=await supabase.from("cleanings").insert({user_id:userId,machine_id:m.id,cleaned_at:at,route_stop_id:stops.find(s=>s.client_id===m.client_id)?.id||null});if(a.error)throw a.error;const b=await supabase.from("machines").update({last_cleaned_at:at}).eq("id",m.id).eq("user_id",userId);if(b.error)throw b.error;});}
+ const due=machines.filter(m=>m.machine_type==="coffee"&&cleaningDue(m.last_cleaned_at,m.cleaning_interval_days));
+ const mins=stops.filter(s=>s.started_at&&s.finished_at).reduce((sum,s)=>sum+Math.round((new Date(s.finished_at!).getTime()-new Date(s.started_at!).getTime())/60000),0);
+ return <main><header><div className="eyebrow">MI RUTA DE TRABAJO</div><h1>Tu jornada</h1><p className="sub">Empresas y máquinas reales, guardadas en tu cuenta.</p><div className="stats"><div><b>{stops.length}</b><span>Paradas hoy</span></div><div><b>{machines.length}</b><span>Máquinas</span></div><div><b>{due.length}</b><span>Limpiar</span></div></div></header>
+ <section className="content">{error&&<div className="panel" role="alert" style={{color:"#b91c1c"}}>{error}</div>}
+ <div className="status"><span className="dot"/>{userId?"Conectado a Supabase":"Conectando..."}</div>
+ <nav>{[["hoy","Hoy"],["clientes","Empresas"],["limpieza","Limpieza"],["progreso","Progreso"]].map(([k,l])=><button key={k} className={tab===k?"active":""} onClick={()=>setTab(k)}>{l}</button>)}</nav>
+ {tab==="hoy"&&<><label className="scan"><Camera/><div><strong>Foto de la hoja de ruta</strong><small>La extracción automática aún no está activada; añade las empresas desde la pestaña Empresas.</small></div><input type="file" accept="image/*" capture="environment" onChange={()=>setError("La lectura de fotos requiere configurar el servicio de reconocimiento. No se ha importado ningún dato.")}/></label>
+ <div className="sectionTitle"><div><span>RUTA REAL · {today}</span><h2>Mis paradas</h2></div><b>{stops.filter(s=>s.status==="done").length}/{stops.length}</b></div>
+ {stops.length===0&&<div className="panel">Todavía no tienes paradas hoy. Añade una empresa desde la pestaña Empresas.</div>}
+ {stops.map((s,i)=>{const c=clients.find(c=>c.id===s.client_id);const ms=machines.filter(m=>m.client_id===s.client_id);return <article className={"stop "+(s.status==="done"?"completed":"")} key={s.id}><div className="stopTop"><span className="number">{i+1}</span><div className="grow"><h3>{c?.name||"Empresa"}</h3><p><MapPin size={14}/>{c?.address||"Sin dirección"}</p></div><span className="time">{s.estimated_minutes||0} min</span></div><div className="machines">{ms.map(m=><span key={m.id} className={cleaningDue(m.last_cleaned_at,m.cleaning_interval_days)&&m.machine_type==="coffee"?"due":""}>{m.label} · {m.external_code||"sin código"}</span>)}</div><div className="actions">{c?.address&&<a href={wazeUrl(c.address)} target="_blank" rel="noreferrer"><Navigation size={17}/> Waze</a>}<button disabled={busy} onClick={()=>changeStop(s)}><CheckCircle2 size={17}/>{s.status==="done"?"Reabrir":s.status==="active"?"Terminar":"Iniciar"}</button></div></article>})}</>}
+ {tab==="clientes"&&<><div className="panel"><h2><Plus size={20}/> Nueva empresa</h2><input placeholder="Nombre real de la empresa" value={name} onChange={e=>setName(e.target.value)}/><input placeholder="Dirección para Waze" value={address} onChange={e=>setAddress(e.target.value)}/><button disabled={busy||!userId||!name.trim()} onClick={addClient}>Guardar empresa</button></div><div className="panel"><h2>Registrar máquina</h2><select value={selected} onChange={e=>setSelected(e.target.value)}><option value="">Selecciona empresa</option>{clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><select value={kind} onChange={e=>setKind(e.target.value)}><option value="coffee">Café</option><option value="snack">Snack</option><option value="cold">Frío</option><option value="water">Agua</option><option value="other">Otra</option></select><input placeholder="Código de máquina" value={code} onChange={e=>setCode(e.target.value)}/><button disabled={busy||!selected} onClick={addMachine}>Guardar máquina</button></div>{clients.map(c=><article className="stop" key={c.id}><h3>{c.name}</h3><p>{c.address||"Dirección pendiente"}</p><p>{machines.filter(m=>m.client_id===c.id).length} máquinas</p><div className="actions"><button disabled={busy||stops.some(s=>s.client_id===c.id)} onClick={()=>addStop(c.id)}><Plus size={16}/> {stops.some(s=>s.client_id===c.id)?"Ya añadida":"Añadir a hoy"}</button></div></article>)}</>}
+ {tab==="limpieza"&&<div className="panel"><Coffee size={28}/><h2>Control de cafeteras</h2><p>Las máquinas sin limpieza registrada aparecen pendientes. Intervalo predeterminado: 14 días.</p>{machines.filter(m=>m.machine_type==="coffee").map(m=><div className="cleanRow" key={m.id}><div><b>{m.external_code||m.label}</b><small>{clients.find(c=>c.id===m.client_id)?.name} · {m.last_cleaned_at?new Date(m.last_cleaned_at).toLocaleDateString("es-ES"):"Nunca limpiada"}</small></div><button disabled={busy} onClick={()=>clean(m)}>{cleaningDue(m.last_cleaned_at,m.cleaning_interval_days)?"Marcar limpia":"Registrar limpieza"}</button></div>)}{!machines.some(m=>m.machine_type==="coffee")&&<p>Aún no hay cafeteras registradas.</p>}</div>}
+ {tab==="progreso"&&<div className="panel"><BarChart3 size={28}/><h2>Rendimiento de hoy</h2><div className="progress"><div><b>{stops.filter(s=>s.status==="done").length}</b><span>paradas terminadas</span></div><div><b>{mins}</b><span>minutos registrados</span></div><div><b>{due.length}</b><span>limpiezas pendientes</span></div></div><p>Los tiempos se calculan con los botones Iniciar y Terminar y se guardan en Supabase.</p></div>}
+ </section></main>;
 }
