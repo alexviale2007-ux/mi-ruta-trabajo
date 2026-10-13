@@ -28,7 +28,10 @@ export default function Home(){
  async function scan(file:File|undefined){if(!file)return;setScanning(true);setError("");try{
   if(file.size>6_000_000)throw new Error("La foto supera los 6 MB. Haz otra con menor resolución.");
   const image=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error("No se pudo abrir la foto"));reader.readAsDataURL(file);});
-  const res=await fetch("/api/scan-route",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image})});
+  const session=await supabase.auth.getSession();
+  const token=session.data.session?.access_token;
+  if(!token)throw new Error("Sesión no disponible");
+  const res=await fetch("/api/scan-route",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},body:JSON.stringify({image})});
   const json=await res.json();if(!res.ok)throw new Error(json.error||"Error al analizar foto");
   setScanned(json.stops||[]);if(!json.stops?.length)setError("No se han identificado empresas. Prueba con una foto más nítida.");
  }catch(e){setError(String(e instanceof Error?e.message:e));}finally{setScanning(false);}}
