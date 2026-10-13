@@ -2,6 +2,7 @@ import {NextRequest,NextResponse} from "next/server";
 export const runtime="nodejs";
 export async function POST(req:NextRequest){
  try{
+  if(!req.headers.get("authorization"))return NextResponse.json({error:"Se requiere autorización."},{status:401});
   const key=process.env.OPENAI_API_KEY;
   if(!key)return NextResponse.json({error:"Falta configurar OPENAI_API_KEY en Vercel."},{status:503});
   const body=await req.json();
